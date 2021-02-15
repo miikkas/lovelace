@@ -1,9 +1,13 @@
+import os.path
 import re
 import django.conf
 from django.core.exceptions import ValidationError
 from django import forms
 from django.forms import fields
 from django.utils.text import slugify
+from django.utils.translation import ugettext as _
+from modeltranslation.forms import TranslationModelForm
+import courses.models as cm
 
 class TextfieldExerciseForm(forms.Form):
     
@@ -29,13 +33,13 @@ class CodeReplaceExerciseForm(forms.Form):
 class FileEditForm(forms.ModelForm):
     
     def get_initial_for_field(self, field, field_name):
-        
+
         default_value = super().get_initial_for_field(field, field_name)
-        
         if isinstance(field, fields.FileField) and default_value:
             default_value.media_slug = self.initial.get("name")
             default_value.field_name = field_name
-        
+            default_value.filename = os.path.basename(default_value.name)
+            
         return default_value
         
         
@@ -43,11 +47,11 @@ class RepeatedTemplateExerciseBackendForm(forms.ModelForm):
     
     def get_initial_for_field(self, field, field_name):
         
-        default_value = super().get_initial_for_field(field, field_name)
-        
+        default_value = super().get_initial_for_field(field, field_name)        
         if isinstance(field, fields.FileField) and default_value:
             default_value.exercise_id = self.initial.get("exercise")
-            default_value.filename = self.initial.get("filename")
+            default_value.field_name = field_name
+            default_value.filename = os.path.basename(default_value.name)
 
         return default_value
 
@@ -88,67 +92,43 @@ class ContentForm(forms.ModelForm):
         term_links = set([match.group("term_name") for match in term_re.finditer(value)])
         
         for link in term_links:
-            if lang == "fi":
-                if not Term.objects.filter(name_fi=link):
-                    missing_terms.append(link)
-                    messages.append("Term matching {} does not exist".format(link))
-            elif lang == "en":
-                if not Term.objects.filter(name_en=link):
-                    missing_terms.append(link)
-                    messages.append("Term matching {} does not exist".format(link))
+            if not Term.objects.filter(**{"name_" + lang: link}):
+                missing_terms.append(link)
+                messages.append("Term matching {} does not exist".format(link))
                                 
         if messages:
             raise ValidationError(messages)
     
-    def clean_content_fi(self):
-        
-        data = self.cleaned_data["content_fi"]
-        self._validate_links(data, "fi")
-        return data
-        
-    def clean_content_en(self):
-        
-        data = self.cleaned_data["content_en"]
-        self._validate_links(data, "en")
-        return data
-        
+    def clean(self):
+        cleaned_data = super().clean()
+        for lang_code, _ in django.conf.settings.LANGUAGES:
+            try:
+                self._validate_links(cleaned_data["content_" + lang_code], lang_code)
+            except ValidationError as e:
+                self.add_error("content_" + lang_code, e)
+    
         
 class TextfieldAnswerForm(forms.ModelForm):
     
-    def clean_answer_fi(self):
+    def _check_regexp(self, exp):
         """
         Validates a regular expression by trying to compile it. Skipped for
         non-regexp answers.
         """
         
-        data = self.cleaned_data["answer_fi"]
-        if not self.cleaned_data["regexp"]:
-            return data
-        
         try:
-            re.compile(data)
-        except re.error as e:
-            raise ValidationError("Broken regexp: {}".format(e))
-        
-        return data
-            
-    def clean_answer_en(self):
-        """
-        Validates a regular expression by trying to compile it. Skipped for
-        non-regexp answers.
-        """
-        
-        data = self.cleaned_data["answer_en"]
-        if not self.cleaned_data["regexp"]:
-            return data
-        
-        try:
-            re.compile(data)
+            re.compile(exp)
         except re.error as e:
             raise ValidationError("Broken regexp: {}".format(e))
 
-        return data
-        
+    def clean(self):
+        cleaned_data = super().clean()
+        for lang_code, _ in django.conf.settings.LANGUAGES:
+            try:
+                self._check_regexp(cleaned_data["answer_" + lang_code])
+            except ValidationError as e:
+                self.add_error("answer_" + lang_code, e)
+            
         
 class InstanceForm(forms.ModelForm):
     
@@ -158,9 +138,105 @@ class InstanceForm(forms.ModelForm):
         slug = slugify(cleaned_data.get("name_{}".format(default_lang)), allow_unicode=True)
         if slug == cleaned_data["course"].slug:
             raise ValidationError("Instance cannot have the same slug as its course")
+
+            
+class InstanceSettingsForm(TranslationModelForm):
+
+    class Meta:
+        model = cm.CourseInstance
+        fields = ["name", "email", "start_date", "end_date", "primary", "manual_accept", "welcome_message", "content_license", "license_url"]
         
-            
-            
-            
+    def __init__(self, *args, **kwargs):
+        available_content = kwargs.pop("available_content")
+        super().__init__(*args, **kwargs)
+        
+        self.fields["frontpage"] = forms.ChoiceField(
+            widget = forms.Select,
+            label = _("Choose frontpage"),
+            choices = [(0, _("--NO-FRONTPAGE--")), ] + [(c.id, c.name) for c in available_content]
+        )
     
+
+class InstanceFreezeForm(forms.Form):
+    
+    freeze_to = forms.DateField(
+        label=_("Freeze instance contents to date:"),
+        required=True
+    )
+    
+class InstanceCloneForm(forms.ModelForm):
+
+    class Meta:
+        model = cm.CourseInstance
+        fields = ["start_date", "end_date"]
+        
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        for lang_code, lang_name in django.conf.settings.LANGUAGES:
+            self.fields["name_" + lang_code] = forms.CharField(
+                label=_("Name for the instance clone ({lang}):").format(lang=lang_code),
+                required=True
+            )
+        
+    
+class NewContentNodeForm(forms.ModelForm):
+
+    class Meta:
+        model = cm.ContentGraph
+        fields = ["publish_date", "deadline", "scored", "visible"]
+        
+    make_child = forms.BooleanField(
+        label=_("Make this node a child of the selected node"),
+        required=False
+    )
+    
+    new_page_name = forms.CharField(
+        label=_("Name for new page (in default language)"),
+        required=False
+    )
+    
+    active_node = forms.IntegerField(
+        widget=forms.HiddenInput,
+        required=True
+    )
+    
+    def __init__(self, *args, **kwargs):
+        available_content = kwargs.pop("available_content")
+        super().__init__(*args, **kwargs)
+        
+        self.fields["content"] = forms.ChoiceField(
+            widget = forms.Select,
+            label = _("Choose content to link"),
+            choices = [(0, _("----NEW--PAGE----")), ] + [(c.id, c.name) for c in available_content]
+        )
+
+
+class NodeSettingsForm(forms.ModelForm):
+    
+    class Meta:
+        model = cm.ContentGraph
+        fields = ["publish_date", "deadline", "scored", "visible"]
+        
+    active_node = forms.IntegerField(
+        widget=forms.HiddenInput,
+        required=True
+    )
+    
+    def __init__(self, *args, **kwargs):
+        available_content = kwargs.pop("available_content")
+        super().__init__(*args, **kwargs)
+        
+        self.fields["content"] = forms.ChoiceField(
+            widget = forms.Select,
+            label = _("Choose content to link"),
+            choices = [(0, _("----NEW--PAGE----")), ] + [(c.id, c.name) for c in available_content]
+        )
+        
+class IndexEntryForm(TranslationModelForm):
+
+    class Meta:
+        pass
+        
+        
     

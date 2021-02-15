@@ -19,6 +19,7 @@ from lovelace.celery import app as celery_app
 
 from utils.access import determine_access, is_course_staff, ensure_responsible
 from utils.content import get_course_instance_tasks
+from utils.notify import send_welcome_email
 
 from courses.models import *
 from teacher_tools.utils import *
@@ -71,6 +72,7 @@ def manage_enrollments(request, course, instance):
         form = request.POST
         
         response = {}
+        affected = []
         
         if "username" in form:
             username = form.get("username")
@@ -85,11 +87,12 @@ def manage_enrollments(request, course, instance):
                     response["msg"] = _("Enrollment status of {} changed to {}".format(username, form.get("action")))
                     response["new_state"] = form.get("action").upper()
                     response["user"] = username
+                    affected.append(username)
             
         else:
             usernames = form.getlist("selected-users")
             action = form.get("action")
-            response["users-affected"] = []
+            affected = []
             response["users-skipped"] = []
             response["affected-title"] = _("Set enrollment state to {} for the following users.".format(action))            
             response["skipped-title"] = _("The operation was not applicable for these users.")
@@ -102,22 +105,30 @@ def manage_enrollments(request, course, instance):
                     if action == "accepted" and enrollment.enrollment_state == "WAITING":
                         enrollment.enrollment_state = action.upper()
                         enrollment.save()
-                        response["users-affected"].append(enrollment.student.username)
+                        affected.append(enrollment.student.username)
                     elif action == "denied" and enrollment.enrollment_state == "WAITING":
                         enrollment.enrollment_state = action.upper()
                         enrollment.save()
-                        response["users-affected"].append(enrollment.student.username)
+                        affected.append(enrollment.student.username)
                     elif action == "expelled" and enrollment.enrollment_state == "ACCEPTED":
                         enrollment.enrollment_state = action.upper()
                         enrollment.save()
-                        response["users-affected"].append(enrollment.student.username)
+                        affected.append(enrollment.student.username)
                     elif action == "accepted" and enrollment.enrollment_state == "EXPELLED":
                         enrollment.enrollment_state = action.upper()
                         enrollment.save()
-                        response["users-affected"].append(enrollment.student.username)
+                        affected.append(enrollment.student.username)
                     else:
                         response["users-skipped"].append(enrollment.student.username)
-                    
+            
+            response["users-affected"] = affected
+        
+        if form.get("action") == "accepted":
+            userlist = User.objects.filter(
+                username__in=affected
+            )
+            send_welcome_email(instance, userlist=userlist)
+        
         return JsonResponse(response)
         
     else:        
@@ -275,7 +286,7 @@ def manage_reminders(request, course, instance):
 
                 return JsonResponse({"reminders": reminder_list, "submit_text": _("Send emails")})
 
-            elif form.cleaned_data["reminder-action"] == "send":
+            elif form.cleaned_data["reminder_action"] == "send":
                 title = form.cleaned_data.get("title", "")
                 header = form.cleaned_data.get("header", "")
                 footer = form.cleaned_data.get("footer", "")
@@ -379,19 +390,4 @@ def moss_progress(request, course, instance, content, task_id):
         })
         data = {"state": task.state, "metadata": task.info, "redirect": progress_url}
         return JsonResponse(data)
-    
         
-        
-        
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    

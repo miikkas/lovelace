@@ -51,6 +51,7 @@ INSTALLED_APPS = (
     'stats',
     'feedback',
     'exercise_admin',
+    'routine_exercise',
     #'debug_toolbar',
     'reversion',
     'teacher_tools'
@@ -177,7 +178,7 @@ LOCALE_PATHS = (
     os.path.join(BASE_DIR, 'locale'),
 )
 
-MODELTRANSLATION_DEFAULT_LANGUAGE = 'fi'
+MODELTRANSLATION_DEFAULT_LANGUAGE = 'en'
 
 # URL prefix for static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/dev/howto/static-files/
@@ -211,6 +212,8 @@ STATICFILES_DIRS = (
     # Always use forward slashes, even on Windows.
     # Don't forget to use absolute paths, not relative paths.
 )
+
+TMP_PATH = "/tmp"
 
 # Make this unique, and don't share it with anybody.
 SECRET_KEY = '$34r(o@3yfyr-=v8*ndtqm6^ti0=p%cyt&amp;a*giv-1w%q21r4ae'
@@ -255,6 +258,14 @@ CACHES = {
 
 STAT_GENERATION_HOUR = None
 
+CHECKING_ENV = {
+    'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    'LC_CTYPE': 'en_US.UTF-8',
+}
+
+WORKER_USERNAME = "nobody"
+RESTRICTED_USERNAME = "nobody"
+
 # Shibboleth related options - uncomment if using Shibboleth
 # First one makes emails invalid usernames when creating accounts
 # Second one is required for Shibboleth logout to work properly
@@ -271,4 +282,4 @@ PRIVATE_STORAGE_X_SENDFILE = False
 MOSSNET_SUBMIT_PATH = None
 MOSSNET_LANGUAGES = []
 
-
+CHECKER_PYTHON_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

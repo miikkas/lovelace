@@ -1,14 +1,16 @@
 import magic
 import os
+import re
 
 from django.core.files.storage import FileSystemStorage
 from django.conf import settings
 from django.http import HttpResponse
 
+mod_pat = re.compile("[wrx]")
 
 PRIVATE_UPLOAD = getattr(settings, "PRIVATE_STORAGE_FS_PATH", settings.MEDIA_ROOT)
-
 upload_storage = FileSystemStorage(location=PRIVATE_UPLOAD)
+
 
 def generate_download_response(fs_path, dl_name=None):
 
@@ -43,6 +45,12 @@ def get_instancefile_path(included_file, filename):
         # TODO: Language?
     )
 
+def get_file_contents(model_instance):
+    file_contents = None
+    with open(model_instance.fileinfo.path, 'rb') as f:
+        file_contents = f.read()
+    return file_contents
+
 def get_testfile_path(instance, filename):
     return os.path.join(
         "{exercise_name}_files".format(exercise_name=instance.exercise.name),
@@ -74,3 +82,6 @@ def get_moss_basefile_path(basefile, filename):
         "mossbase",
         "{filename}".format(filename=filename)
     )
+
+def chmod_parse(modstring):
+    return int(re.sub(mod_pat, "1", modstring).replace("-", "0"), 2)

@@ -17,6 +17,7 @@
     <link rel="stylesheet" href="{% static 'courses/latofonts.css' %}">
     <link rel="stylesheet" href="{% static 'feedback/style.css' %}">
     <link rel="stylesheet" href="{% static 'courses/terms.css' %}">
+    <link rel="stylesheet" href="{% static 'faq/faq.css' %}">
 
     <script src="{% static 'courses/katex.min.js' %}"></script>
     <script src="{% static 'courses/jquery-3.3.1.min.js' %}"></script>
@@ -26,11 +27,12 @@
     <script src="{% static 'courses/exercise.js' %}"></script>
     <script src="{% static 'courses/calendar.js' %}"></script>
     <script src="{% static 'feedback/script.js' %}"></script>
+    <script src="{% static 'faq/faq.js' %}"></script>
     <script>
       $(document).ready(function() {
         // TODO: Store data in a js object
-        add_line_numbers();
-        set_line_widths();
+        // add_line_numbers();
+        // set_line_widths();
 
         add_exercise_form_callbacks();
         add_feedback_form_callbacks();
@@ -164,9 +166,14 @@
           {% endblock %}
         </ul>
         <div class="right-side">
+          <div class="vertical-separator"></div>
+          <a onclick="$('div.toc-box').toggle();" style="cursor:pointer;">
+            <img src="{% static 'courses/toc.png' %}" title="{% trans 'Table of Contents' %}">
+          </a>
+          <div class="vertical-separator"></div>
           {# https://docs.djangoproject.com/en/1.9/topics/i18n/translation/#set-language-redirect-view #}
           <form action="{% url 'set_language' %}" method="post" class="language-picker">
-            {% csrf_token %}
+            {% csrf_token %}            
             <input name="next" type="hidden" value="{{ redirect_to }}">
             <select name="language" onchange="this.form.submit();">
               {% get_current_language as LANGUAGE_CODE %}
@@ -178,7 +185,15 @@
                 </option>
               {% endfor %}
             </select>
-          </form><div class="vertical-separator"></div><a onclick="$('div.toc-box').toggle();" style="cursor:pointer;"><img src="{% static 'courses/toc.png' %}" title="{% trans 'Table of Contents' %}"></a><div class="vertical-separator"></div>
+          </form>
+          {% if course_staff %}
+            <div class="vertical-separator"></div>
+            <button type="button"
+                    class="nav-bar-button"
+                    title="{% trans 'Toggle between student and staff view' %}"
+                    onclick="toggle_staff_widgets(event, this);"
+            >{% trans 'staff view' %}</button>
+          {% endif %}          
         </div>
         </div>
       </nav>
@@ -247,6 +262,11 @@
         {% block page-content %}
         {% endblock %}
       </section>
+      
+      {% block floating-elements %}
+        <div class="arrow-container">
+        </div>
+      {% endblock %}
 
       {% block term-descriptions %}
         <div class="term-descriptions" id="term-descriptions">

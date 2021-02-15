@@ -1,7 +1,7 @@
 from django.conf.urls import include, url
 from django.urls import path
 
-from . import views
+from . import views, staff_views
 
 app_name = "courses"
 
@@ -28,6 +28,45 @@ urlpatterns = [
     # currently disabled
     # path("sandbox/<content:content>/", views.sandboxed_content, name="sandbox",),
     # path("sandbox/<content:content>/check_sandboxed/", views.check_answer_sandboxed, name="check_sandboxed"),
+
+    path("preview/<str:field_name>", staff_views.content_preview, name="content_preview",),
+    
+    # Staff URLs for editing content
+    path(
+        "staff/<course:course>/<instance:instance>/instance_settings/",
+        staff_views.instance_settings,
+        name="instance_settings"
+    ),    
+    path(
+        "staff/<course:course>/<instance:instance>/freeze_instance/",
+        staff_views.freeze_instance,
+        name="freeze_instance"
+    ),    
+    path(
+        "staff/<course:course>/<instance:instance>/clone_instance/",
+        staff_views.clone_instance,
+        name="clone_instance"
+    ),    
+    path(
+        "staff/<course:course>/<instance:instance>/create_content_node/",
+        staff_views.create_content_node,
+        name="create_content_node"
+    ),
+    path(
+        "staff/<course:course>/<instance:instance>/remove_content_node/<int:node_id>/",
+        staff_views.remove_content_node,
+        name="remove_content_node"
+    ),
+    path(
+        "staff/<course:course>/<instance:instance>/node_settings/<int:node_id>/",
+        staff_views.node_settings,
+        name="node_settings"
+    ),
+    path(
+        "staff/<course:course>/<instance:instance>/move_content_node/<int:target_id>/<str:placement>/",
+        staff_views.move_content_node,
+        name="move_content_node"
+    ),
     
     # Help pages
     path("help/", views.help_list, name="help_list",),
@@ -43,11 +82,12 @@ urlpatterns = [
     path("<course:course>/", views.course_instances, name="course_instances"),
     path("<course:course>/<instance:instance>/", views.course, name="course"),
     path("<course:course>/<instance:instance>/<content:content>/", views.content, name="content"),
+    path("<course:course>/<instance:instance>/<content:content>/<int:pagenum>/", views.content, name="content_part"),
 
     # Download views
     path("file-download/embedded/<course:course>/<instance:instance>/<file:mediafile>/", views.download_embedded_file, name="download_embedded_file"),
-    url(r"^file-download/media/(?P<file_slug>[^/]+)/(?P<field_name>[^/]+)/$", views.download_media_file, name="download_media_file"),
-    url(r"^file-download/template-backend/(?P<exercise_id>\d+)/(?P<filename>[^/]+)/$",
+    url(r"^file-download/media/(?P<file_slug>[^/]+)/(?P<field_name>[^/]+)/(?P<filename>[^/]+)/", views.download_media_file, name="download_media_file"),
+    url(r"^file-download/template-backend/(?P<exercise_id>\d+)/(?P<field_name>[^/]+)/(?P<filename>[^/]+)/$",
         views.download_template_exercise_backend, name="download_template_exercise_backend"),
 
 

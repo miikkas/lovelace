@@ -6,6 +6,7 @@ function exercise_success(data, result_div, error_div, form_parent) {
 
     if (data.result) {
         result_div.html(data.result);
+        form_parent.children("form").trigger("reset");
     }
     if (data.evaluation === true || data.evaluation === false) {
         // Get the symbol in meta
@@ -82,9 +83,10 @@ function exercise_success(data, result_div, error_div, form_parent) {
         let all_errors = data.errors;
         error_div.html(all_errors);
         error_div.css("display", "block");
+        form_parent.children("form").trigger("reset");
     }
     if (data.answer_count_str) {
-        form_parent.parent().find('div.task-meta > div > a').html(data.answer_count_str);
+        form_parent.parent().find('div.task-meta > div > a.user-answers-link').html(data.answer_count_str);
     }
     if (data.hints && data.evaluation === false) {
         let all_hints = "<ul>\n";
@@ -117,6 +119,9 @@ function exercise_success(data, result_div, error_div, form_parent) {
             let hint_text = $('section.content').find('#hint-id-' + hint_id);
             hint_text.attr({'class': 'hint-active'});
         }
+        let panel = form_parent.children(".side-panel");
+        let handle = form_parent.parent().find("a.faq-panel-link");
+        faq.handle_triggers(panel, handle, data.triggers);
     }
     if (data.messages) {
         msgs_div.find('div.msgs-list').html(data.messages);
@@ -131,9 +136,10 @@ function exercise_success(data, result_div, error_div, form_parent) {
         file_result_div.css("display", "block");
     }
     if (data.next_instance || data.total_instances) {
-        form_parent.parent().find("form :input").prop("disabled", true);
+        form_parent.parent().find("form.exercise-form :input").prop("disabled", true);
         let interaction_button = form_parent.parent().find('button.rt-interaction');
         interaction_button.prop("disabled", false);
+        interaction_button.focus();
         if (data.next_instance === null && data.evaluation === false) {
             interaction_button.html(interaction_button.attr('data-start-over-text'));
         } else if (data.next_instance === null) {
@@ -143,6 +149,9 @@ function exercise_success(data, result_div, error_div, form_parent) {
         }
     }
 
+    if (data.progress) {
+        form_parent.parent().find("span.rt-progress-tag").html(data.progress);
+    }
 
     if (data.metadata) {
         let current = data.metadata.current;
@@ -240,7 +249,7 @@ function add_exercise_form_callbacks() {
 
 function start_repeated_template_session(e) {
     let button = $(e.target);
-    let exercise = button.parent();
+    let exercise = button.parent().parent();
     //console.log(exercise);
     //let csrf_token = exercise.find("form > input[name=csrfmiddlewaretoken]");
     let rendered_template = exercise.find("div.repeated-template");

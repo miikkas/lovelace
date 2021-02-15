@@ -3,7 +3,7 @@ Django views for rendering the course contents and checking exercises.
 """
 import datetime
 import json
-from cgi import escape
+from html import escape
 from collections import namedtuple
 
 import redis
@@ -37,6 +37,8 @@ from courses.models import *
 from courses.forms import *
 from feedback.models import *
 
+from routine_exercise.models import RoutineExerciseAnswer
+
 from allauth.account.forms import LoginForm
 
 import courses.markupparser as markupparser
@@ -45,9 +47,12 @@ import django.conf
 from django.contrib import auth
 from django.shortcuts import redirect
 
-from utils.access import is_course_staff, determine_media_access, ensure_enrolled_or_staff, ensure_owner_or_staff
+from utils.access import is_course_staff, determine_media_access, ensure_enrolled_or_staff, ensure_owner_or_staff, determine_access, ensure_staff
+from utils.archive import find_version_with_filename
 from utils.content import first_title_from_content
 from utils.files import generate_download_response
+from utils.management import CourseContentAdmin
+from utils.notify import send_error_report, send_welcome_email
 
 try:
     from shibboleth.app_settings import LOGOUT_URL, LOGOUT_REDIRECT_URL, LOGOUT_SESSION_KEY
@@ -139,11 +144,19 @@ def course_instances(request, course):
 
 def check_exercise_accessible(request, course, instance, content):
 
-    embedded_links = EmbeddedLink.objects.filter(embedded_page_id=content.id, instance=instance)
-    content_graph_links = ContentGraph.objects.filter(instance=instance, content=content)
+    embedded_links = EmbeddedLink.objects.filter(
+        embedded_page_id=content.id, instance=instance
+    )
+    content_graph_links = ContentGraph.objects.filter(
+        instance=instance, content=content
+    )
     
     if content_graph_links.first() is None and embedded_links.first() is None:
-        return {'error': HttpResponseNotFound("Content {} is not linked to course {}!".format(content.slug, course.slug))}
+        return {'error': HttpResponseNotFound(
+            "Content {} is not linked to course {}!".format(
+                content.slug, course.slug
+            )
+        )}
 
     return {
         'embedded_links': embedded_links,
@@ -164,16 +177,34 @@ def course(request, course, instance):
     context["instance"] = instance
 
     if is_course_staff(request.user, instance):
-        contents = ContentGraph.objects.filter(instance=instance, ordinal_number__gt=0).order_by('ordinal_number')
+        from utils.management import CourseContentAdmin
+        contents = ContentGraph.objects.filter(
+            instance=instance,
+            ordinal_number__gt=0,
+            parentnode=None
+        ).order_by('ordinal_number')
+        context["course_staff"] = True
+        content_access = CourseContentAdmin.content_access_list(request, ContentPage, "LECTURE")
+        available_content = content_access.defer("content").all()
+        try:
+            frontpage_id = instance.frontpage.id
+        except AttributeError:
+            frontpage_id = 0
     else:
-        contents = ContentGraph.objects.filter(instance=instance, ordinal_number__gt=0, visible=True).order_by('ordinal_number')
+        contents = ContentGraph.objects.filter(
+            instance=instance,
+            ordinal_number__gt=0,
+            visible=True,
+            parentnode=None
+        ).order_by('ordinal_number')
+        context["course_staff"] = False 
     
     if len(contents) > 0:
         tree = []
-        tree.append((mark_safe('>'), None, None, None, None))
+        tree.append((mark_safe('>'), None, None, None, None, None, 0))
         for content_ in contents:
             course_tree(tree, content_, request.user, instance)
-        tree.append((mark_safe('<'), None, None, None, None))
+        tree.append((mark_safe('<'), None, None, None, None, None, 0))
         context["content_tree"] = tree
 
     t = loader.get_template("courses/course.html")
@@ -182,13 +213,14 @@ def course(request, course, instance):
 def course_tree(tree, node, user, instance_obj):
     embedded_links = EmbeddedLink.objects.filter(parent=node.content.id, instance=instance_obj)
     embedded_count = len(embedded_links)
+    page_count = node.content.count_pages(instance_obj)
     
     correct_embedded = 0
     
     evaluation = ""
     if user.is_authenticated:
         exercise = node.content
-        evaluation = exercise.get_user_evaluation(exercise, user, instance_obj)
+        evaluation = exercise.get_user_evaluation(user, instance_obj)
 
         if embedded_count > 0:
             
@@ -200,7 +232,7 @@ def course_tree(tree, node, user, instance_obj):
             
             for link in group_repr:
                 if link.embedded_page.get_user_evaluation(
-                    link.embedded_page, user, instance_obj
+                    user, instance_obj
                     ) in ("correct", "credited"):
                     
                     correct_embedded += 1
@@ -208,9 +240,9 @@ def course_tree(tree, node, user, instance_obj):
             for emb_exercise in embedded_links.filter(embedded_page__evaluation_group="").values_list('embedded_page', flat=True):
                 emb_exercise = ContentPage.objects.get(id=emb_exercise)
                 #print(emb_exercise.name)
-                correct_embedded += 1 if emb_exercise.get_user_evaluation(emb_exercise, user, instance_obj) == "correct" else 0
+                correct_embedded += 1 if emb_exercise.get_user_evaluation(user, instance_obj) == "correct" else 0
     
-    list_item = (node.content, evaluation, correct_embedded, embedded_count, node.visible)
+    list_item = (node.content, node.id, evaluation, correct_embedded, embedded_count, node.visible, page_count)
     
     if list_item not in tree:
         tree.append(list_item)
@@ -221,10 +253,10 @@ def course_tree(tree, node, user, instance_obj):
         children = ContentGraph.objects.filter(parentnode=node, instance=instance_obj, visible=True).order_by('ordinal_number')
     
     if len(children) > 0:
-        tree.append((mark_safe('>'), None, None, None, None))
+        tree.append((mark_safe('>'), None, None, None, None, None, 0))
         for child in children:
             course_tree(tree, child, user, instance_obj)
-        tree.append((mark_safe('<'), None, None, None, None))
+        tree.append((mark_safe('<'), None, None, None, None, None, 0))
 
 def check_answer_sandboxed(request, content_slug):
     """
@@ -286,10 +318,6 @@ def check_answer(request, course, instance, content, revision):
 
     # TODO: Ensure that the content revision really belongs to the course instance
 
-    if revision == "head":
-        latest = Version.objects.get_for_object(content).latest("revision__date_created")
-        revision = latest.revision_id
-
     # Check if a deadline exists and if it has already passed
     try:
         content_graph = ContentGraph.objects.get(instance=instance, content=content)
@@ -312,8 +340,15 @@ def check_answer(request, course, instance, content, revision):
 
     exercise = content
     
+    if revision == "head":
+        latest = Version.objects.get_for_object(content).latest("revision__date_created")
+        answered_revision = latest.revision_id
+        revision = None
+    else:
+        answered_revision = revision
+
     try:
-        answer_object = exercise.save_answer(content, user, ip, answer, files, instance, revision)
+        answer_object = exercise.save_answer(content, user, ip, answer, files, instance, answered_revision)
     except InvalidExerciseAnswerException as e:
         return JsonResponse({
             'result': str(e)
@@ -342,7 +377,7 @@ def check_answer(request, course, instance, content, revision):
 
     # TODO: Errors, hints, comments in JSON
     t = loader.get_template("courses/exercise-evaluation.html")
-    total_evaluation = exercise.get_user_evaluation(content, user, instance)
+    total_evaluation = exercise.get_user_evaluation(user, instance)
     #print(evaluation)
     
     data = {
@@ -467,7 +502,7 @@ def check_progress(request, course, instance, content, revision, task_id):
                                    kwargs={'course': course,
                                            'instance': instance,
                                            'content': content,
-                                           'revision': revision,
+                                           'revision': "head" if revision is None else revision,
                                            'task_id': task_id,})
             if not info: info = task.info # Try again in case the first time was too early
             data = {"state": task.state, "metadata": info, "redirect": progress_url}
@@ -503,13 +538,19 @@ def file_exercise_evaluation(request, course, instance, content, revision, task_
 
     data = compile_evaluation_data(request, evaluation_tree, evaluation_obj, msg_context)
     
-    if evaluation_tree['test_tree'].get('errors', []):
+    errors = evaluation_tree['test_tree'].get('errors', [])
+    if errors:
         if evaluation_tree['timedout']:
             data['errors'] = _("The program took too long to execute and was terminated. Check your code for too slow solutions.")
         else:
-            #print(evaluation_tree['test_tree']['errors'])        
             data['errors'] = _("Checking program was unable to finish due to an error. Contact course staff.")
-            #print(data)
+            answer_url = reverse("courses:show_answers", kwargs={
+                "user": request.user,
+                "course": course,
+                "instance": instance,
+                "exercise": content
+            }) + "#" + str(evaluation_obj.useranswer.id)
+            send_error_report(instance, content, revision, errors, answer_url)
         
     data["answer_count_str"] = answer_count_str
     
@@ -601,7 +642,7 @@ def sandboxed_content(request, content_slug, **kwargs):
         return HttpResponseForbidden("Only logged in admins can view pages in sandbox!")
 
     content_type = content.content_type
-    question = blockparser.parseblock(escape(content.question))
+    question = blockparser.parseblock(escape(content.question, quote=False))
     choices = answers = content.get_choices(content)
 
     rendered_content = content.rendered_markup(request)
@@ -624,7 +665,7 @@ def sandboxed_content(request, content_slug, **kwargs):
         return HttpResponse(t.render(c, request))
 
 @cookie_law
-def content(request, course, instance, content, **kwargs):
+def content(request, course, instance, content, pagenum=None, **kwargs):
     content_graph = None
     revision = None
     #if "frontpage" not in kwargs:
@@ -645,7 +686,7 @@ def content(request, course, instance, content, **kwargs):
             answer_count = content.get_user_answers(content, request.user, instance).count()
         if content_graph and (content_graph.publish_date is None or content_graph.publish_date < datetime.datetime.now()):
             try:
-                evaluation = content.get_user_evaluation(content, request.user, instance)
+                evaluation = content.get_user_evaluation(request.user, instance)
             except NotImplementedError:
                 evaluation = None
         try:
@@ -730,7 +771,7 @@ def content(request, course, instance, content, **kwargs):
             term_data = {
                 'slug' : slug,
                 'name' : term.name,
-                'tags' : tags,
+                'tags' : tags.values_list("name", flat=True),
                 'alias' : False,
             }
 
@@ -751,14 +792,16 @@ def content(request, course, instance, content, **kwargs):
             else:
                 termbank_contents[first_char] = [term_data]
 
-            for alias in term.aliases:
+                
+            aliases = TermAlias.objects.filter(term=term)
+            for alias in aliases:
                 alias_data = {
                     'slug' : slug,
                     'name' : term.name,
-                    'alias' : alias,
+                    'alias' : alias.name,
                 }
 
-                first_char = get_term_initial(alias)
+                first_char = get_term_initial(alias.name)
 
                 if first_char in termbank_contents:
                     termbank_contents[first_char].append(alias_data)
@@ -776,38 +819,26 @@ def content(request, course, instance, content, **kwargs):
         
         cache.set(
             'term_div_data_{instance}_{lang}'.format(
-                instance=context['instance_slug'],                                                           lang=translation.get_language()),
+                instance=context['instance_slug'],
+                lang=translation.get_language()
+            ),
             term_div_data,
             timeout=None
         )
             
-    rendered_content = ""
-
     # TODO: Admin link should point to the correct version!
 
     # TODO: Warn admins if the displayed version is not the current version!
 
-    # Get the other things based on the rev. if set
-    if revision is not None:
-        # This seems unoptimal. Maybe create a patch to django-reversions?
-        # reversion.get_revision_for_object or sth. would be nice...
-        #version_list = reversion.get_for_object(content).order_by('revision_id')
-        # TODO: New form? Version.objects.get_for_object(term)[0].revision.
-        version = Version.objects.get_for_object(content).get(revision_id=revision).field_dict
-        old_content = version["content"]
-        question = version["question"]
-        
-        # Render the old version of the page
-        markup_gen = markupparser.MarkupParser.parse(old_content, request, context)
-        for chunk in markup_gen:
-            rendered_content += chunk
-    else:
-        question = blockparser.parseblock(escape(content.question), {"course": course})
-
+    question = blockparser.parseblock(escape(content.question, quote=False), {"course": course})
     choices = answers = content.get_choices(content, revision=revision)
-
-    if not rendered_content:
-        rendered_content = content.rendered_markup(request, context)
+    rendered_content = content.rendered_markup(request, context, revision, page=pagenum)
+    embedded_links = EmbeddedLink.objects.filter(parent=content, instance=instance
+                                                 ).select_related("embedded_page")
+    embed_dict = {}
+    for link in embedded_links:
+        embed_dict[link.embedded_page.slug] = link.embedded_page
+            
 
     c = {
         'course': course,
@@ -817,6 +848,8 @@ def content(request, course, instance, content, **kwargs):
         'instance_name': instance.name,
         'instance_slug': instance.slug,
         'content': content,
+        'content_blocks': rendered_content,
+        'embedded_pages': embed_dict,
         'rendered_content': rendered_content,
         'embedded': False,
         'content_name': content.name,
@@ -861,7 +894,7 @@ def user_profile_save(request):
     profile.study_program = form["study_program"][:80]
 
     profile.save()
-    request.user.save()
+    request.user.save   ()
     return HttpResponseRedirect('/')
 
 def user_profile(request):
@@ -966,6 +999,7 @@ def show_answers(request, user, course, instance, exercise):
     content_type = exercise.content_type
     question = exercise.question
     choices = exercise.get_choices(exercise)
+    template = "courses/user-exercise-answers.html"
     
     # TODO: Error checking for exercises that don't belong to this course
     
@@ -1007,9 +1041,12 @@ def show_answers(request, user, course, instance, exercise):
             exercise=exercise,
             instance=instance
         )
-        
+    elif content_type == "ROUTINE_EXERCISE":
+        answers = exercise.get_user_answers(exercise, user, instance)
+        template = "routine_exercise/user-answers.html"
+
     answers = answers.order_by('-answer_date')
-    
+
     try:
         link = EmbeddedLink.objects.get(embedded_page=exercise, instance=instance)
     except EmbeddedLink.MultipleObjectsReturned:
@@ -1018,11 +1055,11 @@ def show_answers(request, user, course, instance, exercise):
     else:
         parent = link.parent
         single_linked = True
-      
+
     title, anchor = first_title_from_content(exercise.content)
-    
+
     # TODO: Own subtemplates for each of the exercise types.
-    t = loader.get_template("courses/user-exercise-answers.html")
+    t = loader.get_template(template)
     c = {
         "exercise": exercise,
         "exercise_title": title,
@@ -1103,7 +1140,7 @@ def download_embedded_file(request, course, instance, mediafile):
     return generate_download_response(fs_path, file_object.download_as)
 
     
-def download_media_file(request, file_slug, field_name):
+def download_media_file(request, file_slug, field_name, filename):
     """
     This view function is for downloading media files via the file admin interface.
     """
@@ -1116,39 +1153,51 @@ def download_media_file(request, file_slug, field_name):
     
     if not determine_media_access(request.user, fileobject):
         return HttpResponseForbidden(_("Only course main responsible teachers are allowed to download media files through this interface."))
-                        
+    
     try:
-        fs_path = os.path.join(settings.MEDIA_ROOT, getattr(fileobject, field_name).name)
-    except AttributeError as e:
+        if filename == os.path.basename(getattr(fileobject, field_name).name):
+            fs_path = os.path.join(settings.MEDIA_ROOT, getattr(fileobject, field_name).name)
+        else:
+            # Archived file was requested
+            version = find_version_with_filename(fileobject, field_name, filename)
+            if version:
+                filename = version.field_dict[field_name].name
+                fs_path = os.path.join(settings.MEDIA_ROOT, filename)
+            else:
+                return HttpResponseNotFound(_("Requested file does not exist."))
+    except AttributeError as e: 
         return HttpResponseNotFound(_("Requested file does not exist."))
-
+            
     return generate_download_response(fs_path)
 
 
 # TODO: limit to owner and course staff
-def download_template_exercise_backend(request, exercise_id, filename):
-    
-    if not request.user.is_authenticated:
-        return HttpResponseForbidden(_("Only course staff members are allowed to download repeated template exercise backends."))
-    elif (not request.user.is_staff) and (not request.user.is_superuser):
-        return HttpResponseForbidden(_("Only course staff members are allowed to download repeated template exercise backends."))
+def download_template_exercise_backend(request, exercise_id, field_name, filename):
     
     try:
         exercise_object = RepeatedTemplateExercise.objects.get(id=exercise_id)
     except CourseInstance.DoesNotExist as e:
         return HttpResponseNotFound(_("This exercise does't exist"))
             
-    #if not is_course_staff(request.user, exercise_object.instance.slug):
-    #    return HttpResponseForbidden(_("Only course staff members are allowed to download repeated template exercise backends."))
-    
+    if not determine_access(request.user, exercise_object):
+        return HttpResponseForbidden(_("Only course main responsible teachers are allowed to download files through this interface."))
+            
+    fileobjects = RepeatedTemplateExerciseBackendFile.objects.filter(exercise=exercise_object)
     try:
-        fileobject = RepeatedTemplateExerciseBackendFile.objects.get(filename=filename, exercise=exercise_object)
-    except FileExerciseTestIncludeFile.DoesNotExist as e:
-        return HttpResponseNotFound(_("Requested file does not exist."))
-    
-    try:
-        fs_path = os.path.join(getattr(settings, "PRIVATE_STORAGE_FS_PATH", settings.MEDIA_ROOT), fileobject.fileinfo.name)
-    except AttributeError as e:
+        for fileobject in fileobjects:
+            if filename == os.path.basename(getattr(fileobject, field_name).name):
+                fs_path = os.path.join(settings.PRIVATE_STORAGE_FS_PATH, getattr(fileobject, field_name).name)
+                break
+            else:
+                # Archived file was requested
+                version = find_version_with_filename(fileobject, field_name, filename)
+                if version:
+                    filename = version.field_dict[field_name].name
+                    fs_path = os.path.join(settings.PRIVATE_STORAGE_FS_PATH, filename)
+                    break
+        else:
+            return HttpResponseNotFound(_("Requested file does not exist."))
+    except AttributeError as e: 
         return HttpResponseNotFound(_("Requested file does not exist."))
 
     return generate_download_response(fs_path)
@@ -1182,6 +1231,7 @@ def enroll(request, course, instance):
         if not instance.manual_accept:
             enrollment.enrollment_state = "ACCEPTED"
             response_text = _("Your enrollment has been automatically accepted.")
+            send_welcome_email(instance, user=request.user)
         else:
             enrollment.application_note = form.get("application-note")
             response_text = _("Your enrollment application has been registered for approval.")
@@ -1209,7 +1259,11 @@ def withdraw(request, course, instance):
         enrollment.save()
         
     return JsonResponse({"message": _("Your enrollment has been withdrawn")})
-        
+
+# ^
+# |
+# ENROLLMENT VIEWS
+    
 def help_list(request):
     return HttpResponse()
 
